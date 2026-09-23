@@ -1,0 +1,9 @@
+1. https://link.springer.com/chapter/10.1007/978-3-642-57547-1_51
+2. https://arxiv.org/abs/2607.00245
+3. https://arxiv.org/abs/2602.14219
+4. https://ieeexplore.ieee.org/abstract/document/9234516/
+5. https://ieeexplore.ieee.org/abstract/document/10720018/
+6. https://arxiv.org/abs/2603.10795
+7. https://www.mdpi.com/1999-5903/17/2/57
+8. https://www.tandfonline.com/doi/pdf/10.1080/08874417.2025.2483832
+9. https://www.sciencedirect.com/science/article/pii/S1566253525006712
