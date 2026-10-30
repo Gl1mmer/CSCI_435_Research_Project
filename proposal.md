@@ -1,3 +1,6 @@
+CSCI 435 Blockchain and Cryptocurrencies, Research Track Project, Stage 3
+Topic: Decentralized payments and coordination for agent economies
+
 INTRODUCTION
 AI agents built on large language models (LLMs) are starting to buy services from each
 other. An orchestrating agent splits a job into subtasks, hires specialised agents to
@@ -98,9 +101,11 @@ challenge costs more gas than it can recover.
 All results, including negative ones, are reported against the baseline.
 
 FEASIBILITY AND PLAN
-All tools are on the course list. We implement no cryptography. 
+All tools are on the course list. We implement no cryptography. [Week 6 spike: we settled
+one task through a toy escrow from Python on Anvil, on Windows (WSL) and macOS, using ___
+gas in total. Replace this with what actually happened.]
 
-Roles. M1  builds the agents and the LLM calibration. M2 builds the
+Roles. M1 (backend) builds the agents and the LLM calibration. M2 (backend) builds the
 chain client, the runner and the metrics. M3 builds and tests the contracts.
 Schedule. We build and measure in Weeks 8-12, start writing in Week 11, finish the full
 draft at the end of Week 13, and submit in Week 14. If mechanism B is not working by Week
