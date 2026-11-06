@@ -79,7 +79,7 @@ contract RequesterApproveEscrowTest is Test {
     }
 
     function _skipBlocks(uint256 n) internal {
-        vm.roll(block.number + n);
+        vm.roll(vm.getBlockNumber() + n);
     }
 
     // ------------------------------------------------------------ constructor
@@ -127,7 +127,7 @@ contract RequesterApproveEscrowTest is Test {
         assertEq(storedWorker, worker);
         assertEq(payment, PAYMENT);
         assertEq(resultHash, bytes32(0));
-        assertEq(deadline, block.number + ACCEPT_WINDOW);
+        assertEq(deadline, vm.getBlockNumber() + ACCEPT_WINDOW);
     }
 
     function test_TaskIdsCountUpFromOne() public {
@@ -174,14 +174,14 @@ contract RequesterApproveEscrowTest is Test {
         vm.prank(worker);
         escrow.acceptTask(taskId);
         assertEq(uint256(_state(taskId)), uint256(EscrowBase.State.Accepted));
-        assertEq(_deadline(taskId), block.number + SUBMIT_WINDOW);
+        assertEq(_deadline(taskId), vm.getBlockNumber() + SUBMIT_WINDOW);
 
         vm.expectEmit(address(escrow));
         emit ResultSubmitted(taskId, RESULT);
         vm.prank(worker);
         escrow.submitResult(taskId, RESULT);
         assertEq(uint256(_state(taskId)), uint256(EscrowBase.State.Submitted));
-        assertEq(_deadline(taskId), block.number + REVIEW_WINDOW);
+        assertEq(_deadline(taskId), vm.getBlockNumber() + REVIEW_WINDOW);
         (,,,, bytes32 resultHash,) = escrow.tasks(taskId);
         assertEq(resultHash, RESULT);
 
