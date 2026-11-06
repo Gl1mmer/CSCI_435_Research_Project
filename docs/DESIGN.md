@@ -4,8 +4,9 @@ What the escrow contracts do, how to call them, and why they are built this way.
 Written so that the Python side can drive the contracts with web3.py without reading
 the Solidity.
 
-Status: mechanism A (`RequesterApproveEscrow`) is implemented. Mechanisms C and B are
-added on the same base; their sections are filled in when the contracts land.
+Status: mechanisms A (`RequesterApproveEscrow`) and C (`VerifierAttestedEscrow`) are
+implemented. Mechanism B is added on the same base; its section is filled in when the
+contract lands.
 
 ## 1. Conventions
 
@@ -14,8 +15,8 @@ added on the same base; their sections are filled in when the contracts land.
   `mint(to, amount)`.
 - **Time.** Only block numbers, never timestamps. Each task has one `deadline`, the last
   block in which the next expected step may happen. An action (accept, submit, approve,
-  reject) works while `block.number <= deadline`. A timeout function (reclaim,
-  claimAfterTimeout) works once `block.number > deadline`. So a window of 5 set in block
+  reject, attest) works while `block.number <= deadline`. A timeout function (reclaim,
+  claimAfterTimeout, verifierTimeout) works once `block.number > deadline`. So a window of 5 set in block
   100 allows the action in blocks 100 to 105 and the timeout from block 106.
 - **Task ids** start at 1 and count up by one per contract. `taskCount()` is the latest id.
 - **Results stay off-chain.** The contract stores only a `bytes32` hash of the result.
@@ -103,7 +104,7 @@ Custom errors, no message strings.
 | `ZeroAddress()` | token or worker is the zero address |
 | `ZeroPayment()` | `createTask` with payment 0 |
 | `WrongState()` | the task is not in the state the function needs (also for unknown ids) |
-| `NotRequester()` / `NotWorker()` | the caller is not the party this function belongs to |
+| `NotRequester()` / `NotWorker()` / `NotVerifier()` | the caller is not the party this function belongs to |
 | `TooLate()` | an action after its deadline |
 | `TooEarly()` | a timeout function before the deadline has passed |
 
@@ -122,7 +123,41 @@ The requester judges the work. No extra constructor parameters, no fee, no bond.
 Rejection needs no proof. A free-riding requester can reject correct work and keep
 both the result and the money; this is the weakness the experiment measures.
 
-## 5. Decisions and reasons
+## 5. Mechanism C: `VerifierAttestedEscrow`
+
+One verifier address, fixed at deployment, judges the work and earns a flat fee.
+
+Extra constructor parameters, after the three windows:
+
+| Parameter | Type | Meaning |
+|-----------|------|---------|
+| `verifier_` | address | the only address that may attest; must not be zero |
+| `verifierFee_` | uint256 | flat fee per task in token units; may be 0 |
+
+Readable through `verifier()` and `verifierFee()`.
+
+The requester pays the fee: `requesterDeposit(payment)` returns `payment + verifierFee`,
+and `createTask` pulls that amount.
+
+| Function | Caller | Allowed when | Effect |
+|----------|--------|--------------|--------|
+| `attest(uint256 taskId, bool pass)` | verifier | `Submitted`, within the review window | `pass = true`: pays the worker, `Paid`, emits `TaskPaid`. `pass = false`: refunds the payment to the requester, `Refunded`, emits `TaskRefunded`. Both: sends the fee to the verifier, emits `FeePaid` |
+| `verifierTimeout(uint256 taskId)` | requester | `Submitted`, after the review window | refunds payment and fee to the requester, `Refunded`, emits `TaskRefunded` with `amount = payment + fee` |
+
+Extra event: `FeePaid(uint256 indexed taskId, address indexed to, uint256 amount)`,
+emitted by `attest` only.
+
+`reclaim` (worker missed a window) also returns payment and fee, so its `TaskRefunded`
+amount is `payment + fee`. After `attest(false)` the amount is `payment` only, because
+the fee went to the verifier.
+
+Limitations:
+
+- If the verifier is silent the worker is not paid, even for good work.
+- The contract does not stop the verifier address from also being a task's requester
+  or worker. The experiment uses separate addresses.
+
+## 6. Decisions and reasons
 
 | Decision | Reason |
 |----------|--------|
@@ -135,19 +170,23 @@ both the result and the money; this is the weakness the experiment measures.
 | A: requester silent → worker claims | the worker's payment must not stay locked because a requester is absent |
 | Timeout functions restricted to the party that receives the money | the receiver is the only one with a reason to call, and the gas is then attributed to that role |
 | `SafeERC20`, state written before token calls, `ReentrancyGuard` on functions that pay out | standard protection against failed transfers and re-entrancy |
+| C: one verifier fixed at deployment | the simplest form of third-party attestation; choosing among verifiers is out of scope |
+| C: flat fee, locked at creation, paid for any verdict | the verifier's income does not depend on the verdict, so the fee gives it no reason to favour a side; locking it up front means the verifier cannot be left unpaid |
+| C: verifier silent → payment and fee back to the requester | no verdict means no proof the work was good, and the fee was not earned |
 | Custom errors | cheaper than revert strings and easy to match from tests and web3.py |
 | `Task.state` stored beside `requester` | both fit in one 32-byte slot, which saves a storage write on creation |
 
 Departure from `SRS.md` FR-01: the SRS lets the requester give a completion deadline per
 task. Here the windows are per contract, so that every task in a run has the same timing.
 
-## 6. Using the contracts from Python
+## 7. Using the contracts from Python
 
 `forge build` writes one JSON file per contract:
 
 ```
 contracts/out/MockUSD.sol/MockUSD.json
 contracts/out/RequesterApproveEscrow.sol/RequesterApproveEscrow.json
+contracts/out/VerifierAttestedEscrow.sol/VerifierAttestedEscrow.json
 ```
 
 `abi` is the ABI and `bytecode.object` the deployment bytecode. This example was run
@@ -202,6 +241,9 @@ Notes for the runner:
 - Anvil mines one block per transaction by default, so every transaction moves the
   clock by one block. To let a window expire, mine empty blocks with the `anvil_mine`
   RPC method, for example `w3.provider.make_request("anvil_mine", [6])`.
+- Mechanism C is deployed with two more arguments,
+  `deploy("VerifierAttestedEscrow", token.address, 5, 5, 5, verifier, fee)`, and settled
+  with `escrow.functions.attest(task_id, True)` sent by the verifier.
 - Call `requesterDeposit(payment)` and `workerBond(payment)` to learn how much each
   side must approve. The same two calls work for all three mechanisms.
 - The first `createTask` on a fresh deployment costs more gas than later ones, because
@@ -209,7 +251,7 @@ Notes for the runner:
 - A reverted transaction still uses gas. Whether reverted transactions are counted per
   task is the runner's decision (SRS FR-09).
 
-## 7. Gas baseline
+## 8. Gas baseline
 
 `contracts/.gas-snapshot` holds the gas of every unit test, written by `forge snapshot`.
 `forge test --gas-report` prints gas per contract function. The README has the gas of
