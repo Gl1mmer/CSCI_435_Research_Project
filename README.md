@@ -108,9 +108,10 @@ DEPLOYER=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
 REQUESTER=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
 WORKER=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
 
-# Deploy the token and the escrows for mechanisms A and C. Defaults: every window 5
-# blocks, verifier = Anvil account 3, verifier fee 10,000 units. Set ACCEPT_WINDOW,
-# SUBMIT_WINDOW, REVIEW_WINDOW, VERIFIER or VERIFIER_FEE in the environment to change them.
+# Deploy the token and the three escrows. Defaults: every window 5 blocks, verifier =
+# Anvil account 3, verifier fee 10,000 units, arbiter = Anvil account 4, bond 10%.
+# To change them set ACCEPT_WINDOW, SUBMIT_WINDOW, REVIEW_WINDOW, CHALLENGE_WINDOW,
+# ARBITER_WINDOW, VERIFIER, VERIFIER_FEE, ARBITER or BOND_BPS in the environment.
 forge script script/Deploy.s.sol --rpc-url $ETH_RPC_URL --broadcast --unlocked --sender $DEPLOYER
 
 # On a fresh Anvil the script always prints the same addresses. These are the token
@@ -151,6 +152,59 @@ Gas measured with these commands on 2026-11-06 (Foundry 1.9.0, solc 0.8.30, opti
 This is the first task on a new deployment. Its `createTask` is more expensive than
 later ones because it writes the task counter and the escrow's token balance for the
 first time.
+
+### One task through each mechanism
+
+`script/gas_one_task.sh` does the same for all three mechanisms and prints the gas of
+every transaction. With `anvil` running, from `contracts/`:
+
+```bash
+bash script/gas_one_task.sh
+```
+
+Output on 2026-11-06 with the same toolchain (payment 1 mUSD, verifier fee 0.01 mUSD,
+bond 10%, every window 5 blocks):
+
+```
+A requester-approve: approved
+  createTask     requester     176296
+  acceptTask     worker         35163
+  submitResult   worker         58071
+  approve        requester      48723
+  total for the task           318253
+
+C verifier-attested: passed
+  createTask     requester     176416
+  acceptTask     worker         35185
+  submitResult   worker         58071
+  attest         verifier       76128
+  total for the task           345800
+
+B optimistic stake: not challenged
+  createTask     requester     176296
+  acceptTask     worker         58955
+  submitResult   worker         58160
+  finalize       worker         50950
+  total for the task           344361
+
+B optimistic stake: challenged, challenge upheld
+  createTask     requester     159196
+  acceptTask     worker         58955
+  submitResult   worker         58160
+  challenge      challenger     81514
+  resolve        arbiter        59612
+  total for the task           417437
+
+all escrows are empty
+```
+
+Gas depends on the state of the token's storage, so these are examples, not constants.
+Mechanism A costs 318,253 here and 325,753 in the walk-through above for the same four
+calls: in the walk-through the requester's balance and allowance drop to exactly zero in
+`createTask` (two storage refunds, 9,600 gas less) and the worker's balance is written
+for the first time in `approve` (17,100 gas more). The second task on escrow B has a
+cheaper `createTask` because the task counter is already set. The numbers for the paper
+come from the experiment runner, which measures every task.
 
 ## Run the experiments
 
