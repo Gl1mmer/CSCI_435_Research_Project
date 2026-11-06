@@ -218,3 +218,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Foundry (contracts/)
+contracts/out/
+contracts/cache/
+contracts/dependencies/
+contracts/broadcast/
+
+# Slither has its own venv because it needs web3 < 8
+.venv-slither/

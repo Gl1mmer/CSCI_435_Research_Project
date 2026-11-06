@@ -1,0 +1,427 @@
+# Contract design
+
+What the escrow contracts do, how to call them, and why they are built this way.
+Written so that the Python side can drive the contracts with web3.py without reading
+the Solidity.
+
+Status: all three mechanisms are implemented: A (`RequesterApproveEscrow`),
+C (`VerifierAttestedEscrow`) and B (`OptimisticStakeEscrow`), and so is the optional
+spending guard for SQ3 (`BudgetGuard`).
+
+## 1. Conventions
+
+- **Token.** All amounts are in units of `MockUSD`, an ERC-20 token with 6 decimals.
+  1 mUSD = 1,000,000 units, so US$0.001 is 1,000 units. Anyone can call
+  `mint(to, amount)`.
+- **Time.** Only block numbers, never timestamps. Each task has one `deadline`, the last
+  block in which the next expected step may happen. An action (accept, submit, approve,
+  reject, attest, challenge, resolve) works while `block.number <= deadline`. A timeout
+  function (reclaim, claimAfterTimeout, verifierTimeout, finalize, arbiterTimeout) works
+  once `block.number > deadline`. So a window of 5 set in block
+  100 allows the action in blocks 100 to 105 and the timeout from block 106.
+- **Task ids** start at 1 and count up by one per contract. `taskCount()` is the latest id.
+- **Results stay off-chain.** The contract stores only a `bytes32` hash of the result.
+  The contract never knows whether a result is correct; ground truth lives in the runner.
+- **One transaction per step and per role.** Every function below is called by exactly
+  one role, so the gas of a transaction belongs to that role.
+
+## 2. Life-cycle
+
+```
+                 acceptTask            submitResult
+   Created ───────────────► Accepted ───────────────► Submitted
+      │                        │                          │
+      │ reclaim                │ reclaim                  │ settled by the mechanism
+      │ (accept window         │ (submit window           │
+      │  missed)               │  missed)                 ├──► Paid       worker gets the payment
+      ▼                        ▼                          └──► Refunded   requester gets it back
+   Refunded                 Refunded
+```
+
+Mechanism B adds one state between `Submitted` and the end:
+
+```
+              challenge              resolve(workerWins = true)
+   Submitted ───────────► Disputed ─────────────────────────────► Paid
+      │                      │
+      │ finalize             ├── resolve(workerWins = false) ───► Refunded
+      │ (no challenge        │
+      ▼  in the window)      └── arbiterTimeout ────────────────► Refunded
+     Paid
+```
+
+`Paid` and `Refunded` are terminal. No function accepts a task in either state, so a
+task is settled exactly once.
+
+State numbers, as returned by `tasks(taskId)`:
+
+| Value | State | Meaning |
+|-------|-------|---------|
+| 0 | None | no task with this id |
+| 1 | Created | payment locked, waiting for the worker to accept |
+| 2 | Accepted | waiting for the worker to submit |
+| 3 | Submitted | result hash stored, waiting for settlement |
+| 4 | Disputed | mechanism B only: challenged, waiting for the arbiter |
+| 5 | Paid | terminal: the worker received the payment |
+| 6 | Refunded | terminal: the requester received the payment back |
+
+## 3. Shared interface (`EscrowBase`)
+
+Every mechanism has these.
+
+### Constructor parameters
+
+| Parameter | Type | Meaning |
+|-----------|------|---------|
+| `token_` | address | the ERC-20 used for payment; must not be zero |
+| `acceptWindow_` | uint256 | blocks the worker has to accept after creation |
+| `submitWindow_` | uint256 | blocks the worker has to submit after accepting |
+| `reviewWindow_` | uint256 | blocks in which a submitted result can be judged (in B: challenged) |
+
+All are fixed at deployment and readable through `token()`, `acceptWindow()`,
+`submitWindow()`, `reviewWindow()`.
+
+### Functions
+
+| Function | Caller | Allowed when | Effect |
+|----------|--------|--------------|--------|
+| `createTask(address worker, uint256 payment) → uint256 taskId` | anyone; becomes the requester | `worker != 0`, `payment > 0`, caller approved the escrow for `requesterDeposit(payment)` | pulls the deposit, state `Created`, deadline = now + acceptWindow |
+| `acceptTask(uint256 taskId)` | the task's worker | state `Created`, within deadline | state `Accepted`, deadline = now + submitWindow |
+| `submitResult(uint256 taskId, bytes32 resultHash)` | the task's worker | state `Accepted`, within deadline | stores the hash, state `Submitted`, deadline = now + reviewWindow |
+| `reclaim(uint256 taskId)` | the task's requester | state `Created` or `Accepted`, after deadline | refunds the deposit, state `Refunded`; in B also sends the worker's bond to the requester if the worker had accepted |
+| `requesterDeposit(uint256 payment) → uint256` | anyone (view) | always | tokens the requester must approve for a task of this payment |
+| `workerBond(uint256 payment) → uint256` | anyone (view) | always | tokens the worker must approve before accepting (0 in A and C) |
+| `tasks(uint256 taskId)` | anyone (view) | always | `(requester, state, worker, payment, resultHash, deadline)` |
+| `taskCount() → uint256` | anyone (view) | always | number of tasks created |
+
+### Events
+
+| Event | Emitted by | Meaning |
+|-------|-----------|---------|
+| `TaskCreated(uint256 indexed taskId, address indexed requester, address indexed worker, uint256 payment)` | `createTask` | new task, payment locked |
+| `TaskAccepted(uint256 indexed taskId)` | `acceptTask` | |
+| `ResultSubmitted(uint256 indexed taskId, bytes32 resultHash)` | `submitResult` | |
+| `TaskPaid(uint256 indexed taskId, address indexed to, uint256 amount)` | any settlement that ends in `Paid` | exactly once per paid task; `to` is the worker, `amount` the payment |
+| `TaskRefunded(uint256 indexed taskId, address indexed to, uint256 amount)` | any settlement that ends in `Refunded` | exactly once per refunded task; `to` is the requester, `amount` what it gets back of its deposit |
+| `BondPaid(uint256 indexed taskId, address indexed to, uint256 amount)` | mechanism B only | bond money leaving the escrow to `to` |
+
+Every state change emits an event carrying the task id. The final outcome of a task is
+read from whether it emitted `TaskPaid` or `TaskRefunded`.
+
+### Errors
+
+Custom errors, no message strings.
+
+| Error | Raised when |
+|-------|-------------|
+| `ZeroAddress()` | token or worker is the zero address |
+| `ZeroPayment()` | `createTask` with payment 0 |
+| `WrongState()` | the task is not in the state the function needs (also for unknown ids) |
+| `NotRequester()` / `NotWorker()` / `NotVerifier()` / `NotArbiter()` | the caller is not the party this function belongs to |
+| `WorkerCannotChallenge()` | B: the task's worker tried to challenge its own result |
+| `TooLate()` | an action after its deadline |
+| `TooEarly()` | a timeout function before the deadline has passed |
+
+The state is checked first, then the caller, then the deadline.
+
+## 4. Mechanism A: `RequesterApproveEscrow`
+
+The requester judges the work. No extra constructor parameters, no fee, no bond.
+
+| Function | Caller | Allowed when | Effect |
+|----------|--------|--------------|--------|
+| `approve(uint256 taskId)` | requester | `Submitted`, within the review window | pays the worker, `Paid`, emits `TaskPaid` |
+| `reject(uint256 taskId)` | requester | `Submitted`, within the review window | refunds the requester, `Refunded`, emits `TaskRefunded` |
+| `claimAfterTimeout(uint256 taskId)` | worker | `Submitted`, after the review window | pays the worker, `Paid`, emits `TaskPaid` |
+
+Rejection needs no proof. A free-riding requester can reject correct work and keep
+both the result and the money; this is the weakness the experiment measures.
+
+## 5. Mechanism C: `VerifierAttestedEscrow`
+
+One verifier address, fixed at deployment, judges the work and earns a flat fee.
+
+Extra constructor parameters, after the three windows:
+
+| Parameter | Type | Meaning |
+|-----------|------|---------|
+| `verifier_` | address | the only address that may attest; must not be zero |
+| `verifierFee_` | uint256 | flat fee per task in token units; may be 0 |
+
+Readable through `verifier()` and `verifierFee()`.
+
+The requester pays the fee: `requesterDeposit(payment)` returns `payment + verifierFee`,
+and `createTask` pulls that amount.
+
+| Function | Caller | Allowed when | Effect |
+|----------|--------|--------------|--------|
+| `attest(uint256 taskId, bool pass)` | verifier | `Submitted`, within the review window | `pass = true`: pays the worker, `Paid`, emits `TaskPaid`. `pass = false`: refunds the payment to the requester, `Refunded`, emits `TaskRefunded`. Both: sends the fee to the verifier, emits `FeePaid` |
+| `verifierTimeout(uint256 taskId)` | requester | `Submitted`, after the review window | refunds payment and fee to the requester, `Refunded`, emits `TaskRefunded` with `amount = payment + fee` |
+
+Extra event: `FeePaid(uint256 indexed taskId, address indexed to, uint256 amount)`,
+emitted by `attest` only.
+
+`reclaim` (worker missed a window) also returns payment and fee, so its `TaskRefunded`
+amount is `payment + fee`. After `attest(false)` the amount is `payment` only, because
+the fee went to the verifier.
+
+Limitations:
+
+- If the verifier is silent the worker is not paid, even for good work.
+- The contract does not stop the verifier address from also being a task's requester
+  or worker. The experiment uses separate addresses.
+
+## 6. Mechanism B: `OptimisticStakeEscrow`
+
+Work is paid without a verdict unless somebody objects. The worker locks a bond when it
+accepts. A challenger locks an equal bond to dispute the result, and a fixed arbiter
+decides. The loser's bond goes to the winner.
+
+Constructor parameters, in order:
+
+| Parameter | Type | Meaning |
+|-----------|------|---------|
+| `token_` | address | as in the base |
+| `acceptWindow_` | uint256 | as in the base |
+| `submitWindow_` | uint256 | as in the base |
+| `challengeWindow_` | uint256 | blocks after submission in which the result can be challenged; this is the base's `reviewWindow()` |
+| `arbiterWindow_` | uint256 | blocks the arbiter has to resolve after a challenge |
+| `arbiter_` | address | the only address that may resolve; must not be zero |
+| `bondBps_` | uint256 | bond as a share of the payment in basis points (1,000 = 10%); may be 0 |
+
+Readable through `arbiter()`, `bondBps()`, `arbiterWindow()`, `reviewWindow()`.
+
+Bond size: `workerBond(payment) = payment * bondBps / 10000`, rounded down. The worker's
+bond and the challenger's bond are this same amount. The worker must approve the escrow
+for it before `acceptTask`, the challenger before `challenge`.
+
+| Function | Caller | Allowed when | Effect |
+|----------|--------|--------------|--------|
+| `acceptTask(uint256 taskId)` | worker | as in the base | also pulls the worker's bond |
+| `challenge(uint256 taskId)` | anyone except the task's worker | `Submitted`, within the challenge window | pulls the challenger's bond, state `Disputed`, deadline = now + arbiterWindow, emits `TaskChallenged` |
+| `finalize(uint256 taskId)` | anyone | `Submitted`, after the challenge window | worker gets payment and its bond, `Paid`, emits `TaskPaid` and `BondPaid(worker, bond)` |
+| `resolve(uint256 taskId, bool workerWins)` | arbiter | `Disputed`, within the arbiter window | `true` (challenge rejected): worker gets payment and both bonds, `Paid`, emits `TaskPaid` and `BondPaid(worker, 2 × bond)`. `false` (challenge upheld): requester gets the payment, challenger gets both bonds, `Refunded`, emits `TaskRefunded` and `BondPaid(challenger, 2 × bond)` |
+| `arbiterTimeout(uint256 taskId)` | anyone | `Disputed`, after the arbiter window | requester gets the payment, worker and challenger each get their own bond, `Refunded`, emits `TaskRefunded` and two `BondPaid` |
+| `challengerOf(uint256 taskId) → address` | anyone (view) | always | who challenged the task, or zero |
+
+Extra event: `TaskChallenged(uint256 indexed taskId, address indexed challenger)`.
+
+How the bonds end up, for a payment `P` and bond `b`:
+
+| Outcome | Requester | Worker | Challenger |
+|---------|-----------|--------|------------|
+| worker never submits (`reclaim`) | gets `P + b` | loses `b` | |
+| no challenge (`finalize`) | pays `P` | gets `P`, bond back | |
+| challenge rejected (`resolve(true)`) | pays `P` | gets `P + b` | loses `b` |
+| challenge upheld (`resolve(false)`) | gets `P` back | loses `b` | gets `b` |
+| arbiter silent (`arbiterTimeout`) | gets `P` back | bond back | bond back |
+
+`TaskPaid` and `TaskRefunded` always carry the payment `P`; bond money is reported only
+in `BondPaid`. The functions of B emit `BondPaid` even when the bond rounds down to 0.
+
+Limitations:
+
+- One trusted arbiter. The contract cannot check its decision.
+- If the arbiter is silent the worker is not paid, even for good work.
+- One challenge per task. The worker cannot challenge its own task from its own
+  address, but the contract cannot stop it from using a second address. A faulty worker
+  that does so before anyone else wins its own bond back when the challenge is upheld.
+- A very small payment has a bond of 0 (for 10%, any payment below 10 units), and then
+  a challenge is free.
+
+## 7. `BudgetGuard` (SQ3)
+
+A wallet for the orchestrator with limits the chain enforces. The guard holds the
+tokens. The orchestrator's key can spend them only by creating tasks through the guard,
+and the guard refuses a task that breaks one of three limits.
+
+Two keys:
+
+- **owner**: sets the allowlist and withdraws funds. Meant to be kept offline.
+- **orchestrator**: the agent's everyday key, the one assumed to be at risk.
+
+Constructor parameters, in order:
+
+| Parameter | Type | Meaning |
+|-----------|------|---------|
+| `token_` | address | the ERC-20 the guard holds |
+| `owner_` | address | may change the allowlist and withdraw |
+| `orchestrator_` | address | may create tasks and act as their requester |
+| `perTaskCap_` | uint256 | the most one task may lock (payment plus verifier fee in C) |
+| `epochBudget_` | uint256 | the most all tasks created in one epoch may lock |
+| `epochLength_` | uint256 | blocks per epoch; epoch number = `block.number / epochLength`; must be above 0 |
+
+All six are fixed at deployment and readable (`token()`, `owner()`, ...). To fund the
+guard, transfer or mint tokens to its address.
+
+| Function | Caller | Effect |
+|----------|--------|--------|
+| `setEscrowAllowed(address escrow, bool allowed)` | owner | adds or removes an escrow; emits `EscrowAllowed` |
+| `withdraw(uint256 amount)` | owner | sends tokens from the guard to the owner; emits `Withdrawn` |
+| `createTask(address escrow, address worker, uint256 payment) → uint256 taskId` | orchestrator | checks the three limits, approves the escrow for exactly the deposit and calls its `createTask`; emits `Spent` |
+| `reclaim(address escrow, uint256 taskId)` | orchestrator | forwards to the escrow's `reclaim` (A, C, B) |
+| `approve(address escrow, uint256 taskId)` | orchestrator | forwards to `approve` (A) |
+| `reject(address escrow, uint256 taskId)` | orchestrator | forwards to `reject` (A) |
+| `verifierTimeout(address escrow, uint256 taskId)` | orchestrator | forwards to `verifierTimeout` (C) |
+| `allowedEscrow(address) → bool`, `currentEpoch()`, `spentInEpoch()` | anyone (view) | the allowlist and this epoch's spending |
+
+The guard is the requester of every task it creates: `TaskCreated.requester` is the
+guard's address and every refund returns to the guard. That is why the requester's
+functions have to be forwarded. The forwarded calls work only on allowlisted escrows.
+
+Events: `EscrowAllowed(address indexed escrow, bool allowed)`,
+`Spent(address indexed escrow, uint256 amount, uint256 epoch)`,
+`Withdrawn(address indexed to, uint256 amount)`. The id of a task created through the
+guard is in the escrow's `TaskCreated` event of the same transaction.
+
+Errors: `NotOwner()`, `NotOrchestrator()`, `EscrowNotAllowed()`, `OverTaskCap()`,
+`OverEpochBudget()`, `ZeroAddress()`, `ZeroEpochLength()`.
+
+What the limits mean:
+
+- The cap and the budget count what leaves the guard, which is
+  `escrow.requesterDeposit(payment)`: the payment, plus the verifier fee in C.
+- The budget counts gross spending. A refund returns the tokens to the guard but does
+  not give budget back within the epoch.
+- A thief with the orchestrator key can still create tasks for its own address and, in
+  mechanism A, approve them. The guard does not prevent that loss; it bounds it to
+  `epochBudget` per epoch until the owner withdraws the rest.
+- In mechanism B the guard does not post challenger bonds. A challenge is sent from an
+  ordinary account.
+
+Gas: `contracts/script/gas_one_task.sh` measures `createTask` on escrow A sent directly
+and through the guard. The README shows the result.
+
+## 8. Decisions and reasons
+
+| Decision | Reason |
+|----------|--------|
+| Result hash on-chain, result off-chain | storing results would dominate gas and the contract cannot judge them anyway |
+| Windows in blocks, set in the constructor | deterministic runs; small windows let many tasks finish quickly |
+| One `deadline` field reused for each step | only one step is ever pending, so one field is enough and costs one storage slot |
+| After the deadline only the timeout path works | one rule for every window; a late approve or reject cannot race a claim |
+| Worker misses accept or submit window → requester reclaims | the requester's money must not stay locked because a worker is absent |
+| A: requester rejects → refund, no dispute | this is the baseline; its weakness against free-riding is a result, not a bug |
+| A: requester silent → worker claims | the worker's payment must not stay locked because a requester is absent |
+| Timeout functions restricted to the party that receives the money | the receiver is the only one with a reason to call, and the gas is then attributed to that role |
+| `SafeERC20`, state written before token calls, `ReentrancyGuard` on functions that pay out | standard protection against failed transfers and re-entrancy |
+| C: one verifier fixed at deployment | the simplest form of third-party attestation; choosing among verifiers is out of scope |
+| C: flat fee, locked at creation, paid for any verdict | the verifier's income does not depend on the verdict, so the fee gives it no reason to favour a side; locking it up front means the verifier cannot be left unpaid |
+| C: verifier silent → payment and fee back to the requester | no verdict means no proof the work was good, and the fee was not earned |
+| B: bond = share of the payment in basis points, same for worker and challenger | scales with the task value; one parameter instead of two keeps the experiment grid small |
+| B: worker that accepted and did not submit loses its bond to the requester | the bond is the cost of taking a task and not delivering |
+| B: no challenge → anyone finalises | payment must not depend on any single party coming back |
+| B: loser's bond goes to the winner | this is what pays a challenger for checking, and what makes a false challenge cost something |
+| B: the task's worker cannot challenge | otherwise a faulty worker challenges itself first and loses nothing |
+| B: arbiter silent → dispute cancelled, deposits returned, payment refunded | without a verdict nobody can be slashed fairly |
+| Guard: separate owner and orchestrator keys | the key that is online every day can only spend within the limits; the key that can take everything stays offline |
+| Guard: budget per epoch counted in blocks | the same clock as the escrows, deterministic in the experiment |
+| Guard: limits apply to the deposit, and refunds do not restore budget | the deposit is what actually leaves the guard; never restoring budget is the simple and safe rule |
+| Guard: approves exactly one deposit per task | the escrow is never left with an allowance it could use later |
+| Guard: limits are fixed at deployment | a stolen key cannot raise them, and there is no admin function to test |
+| Custom errors | cheaper than revert strings and easy to match from tests and web3.py |
+| `Task.state` stored beside `requester` | both fit in one 32-byte slot, which saves a storage write on creation |
+
+Departure from `SRS.md` FR-01: the SRS lets the requester give a completion deadline per
+task. Here the windows are per contract, so that every task in a run has the same timing.
+
+## 9. Using the contracts from Python
+
+`forge build` writes one JSON file per contract:
+
+```
+contracts/out/MockUSD.sol/MockUSD.json
+contracts/out/RequesterApproveEscrow.sol/RequesterApproveEscrow.json
+contracts/out/VerifierAttestedEscrow.sol/VerifierAttestedEscrow.json
+contracts/out/OptimisticStakeEscrow.sol/OptimisticStakeEscrow.json
+contracts/out/BudgetGuard.sol/BudgetGuard.json
+```
+
+`abi` is the ABI and `bytecode.object` the deployment bytecode. This example was run
+against Anvil with the versions in `requirements.txt`; start `anvil` first and run it
+from the repository root.
+
+```python
+import json
+from web3 import Web3
+from web3.logs import DISCARD
+
+w3 = Web3(Web3.HTTPProvider("http://127.0.0.1:8545"))
+deployer, requester, worker = w3.eth.accounts[:3]   # Anvil's unlocked test accounts
+
+def load(name):
+    with open(f"contracts/out/{name}.sol/{name}.json") as f:
+        artifact = json.load(f)
+    return artifact["abi"], artifact["bytecode"]["object"]
+
+def deploy(name, *args):
+    abi, bytecode = load(name)
+    tx = w3.eth.contract(abi=abi, bytecode=bytecode).constructor(*args).transact({"from": deployer})
+    receipt = w3.eth.wait_for_transaction_receipt(tx)
+    return w3.eth.contract(address=receipt.contractAddress, abi=abi)
+
+def send(call, sender):
+    receipt = w3.eth.wait_for_transaction_receipt(call.transact({"from": sender}))
+    assert receipt.status == 1
+    return receipt
+
+token = deploy("MockUSD")
+escrow = deploy("RequesterApproveEscrow", token.address, 5, 5, 5)   # accept, submit, review windows
+
+payment = 1_000_000                                                  # 1 mUSD
+send(token.functions.mint(requester, payment), requester)
+send(token.functions.approve(escrow.address, escrow.functions.requesterDeposit(payment).call()), requester)
+
+receipt = send(escrow.functions.createTask(worker, payment), requester)
+task_id = escrow.events.TaskCreated().process_receipt(receipt, errors=DISCARD)[0]["args"]["taskId"]
+
+gas = {"createTask": receipt.gasUsed}
+gas["acceptTask"] = send(escrow.functions.acceptTask(task_id), worker).gasUsed
+gas["submitResult"] = send(escrow.functions.submitResult(task_id, Web3.keccak(text="result")), worker).gasUsed
+gas["approve"] = send(escrow.functions.approve(task_id), requester).gasUsed
+
+state = escrow.functions.tasks(task_id).call()[1]                    # 5 = Paid, 6 = Refunded
+print(task_id, state, gas, token.functions.balanceOf(worker).call())
+```
+
+Notes for the runner:
+
+- Anvil mines one block per transaction by default, so every transaction moves the
+  clock by one block. To let a window expire, mine empty blocks with the `anvil_mine`
+  RPC method, for example `w3.provider.make_request("anvil_mine", [6])`.
+- Mechanism C is deployed with two more arguments,
+  `deploy("VerifierAttestedEscrow", token.address, 5, 5, 5, verifier, fee)`, and settled
+  with `escrow.functions.attest(task_id, True)` sent by the verifier.
+- Mechanism B is deployed with
+  `deploy("OptimisticStakeEscrow", token.address, 5, 5, 5, 5, arbiter, 1000)` (accept,
+  submit, challenge and arbiter windows, arbiter, bond in basis points). The worker
+  must hold and approve `workerBond(payment)` before `acceptTask`, and a challenger the
+  same amount before `challenge`.
+- Call `requesterDeposit(payment)` and `workerBond(payment)` to learn how much each
+  side must approve. The same two calls work for all three mechanisms.
+- The first `createTask` on a fresh deployment costs more gas than later ones, because
+  it writes the task counter and the escrow's token balance for the first time.
+- A reverted transaction still uses gas. Whether reverted transactions are counted per
+  task is the runner's decision (SRS FR-09).
+
+## 10. Static analysis
+
+`docs/slither-report.md` holds the Slither output. Slither reports nothing in the
+contracts of this project. The 18 informational results it does report are all in
+OpenZeppelin's code and are accepted:
+
+| Detector | Why accepted |
+|----------|--------------|
+| `assembly` (13) | inline assembly inside `SafeERC20` and `StorageSlot`; audited library code |
+| `pragma` (1) | OpenZeppelin uses version ranges, our files use exactly 0.8.30; `foundry.toml` pins one compiler for everything |
+| `solc-version` (4) | those ranges would allow old compilers with known bugs; the pinned 0.8.30 is the only one used |
+
+Slither's re-entrancy detectors cannot see calls made through `SafeERC20`, so they say
+nothing about our payouts. `contracts/test/Reentrancy.t.sol` tests that instead.
+
+## 11. Gas baseline
+
+`contracts/.gas-snapshot` holds the gas of every unit test, written by `forge snapshot`.
+`forge test --gas-report` prints gas per contract function. `contracts/script/gas_one_task.sh`
+sends one real task through each mechanism on Anvil and prints the gas of every
+transaction; the README shows its output.

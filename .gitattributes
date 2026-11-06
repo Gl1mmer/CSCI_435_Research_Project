@@ -1,0 +1,7 @@
+# Shell scripts must keep LF line endings, or bash cannot run them after a checkout
+# on Windows.
+*.sh text eol=lf
+
+# Soldeer rewrites foundry.toml with LF endings. Keeping it LF in every checkout stops
+# git on Windows from showing the file as modified after `forge soldeer install`.
+contracts/foundry.toml text eol=lf
