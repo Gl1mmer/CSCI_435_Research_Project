@@ -84,6 +84,72 @@ forge build
 forge test -vv
 ```
 
+`forge test --gas-report` adds a gas table per function. `forge snapshot --check` compares
+the gas of every test with the tracked baseline in `contracts/.gas-snapshot`.
+
+## Deploy and settle one task on a local chain
+
+This sends real transactions to a local Anvil chain: deploy, then one task through
+mechanism A (create, accept, submit, approve). The interface is described in
+`docs/DESIGN.md`.
+
+Terminal 1, the chain:
+
+```bash
+anvil
+```
+
+Terminal 2, from `contracts/`. The addresses are Anvil's fixed test accounts 0, 1 and 2,
+which Anvil signs for itself, so no private key is needed.
+
+```bash
+export ETH_RPC_URL=http://127.0.0.1:8545
+DEPLOYER=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+REQUESTER=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
+WORKER=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
+
+# Deploy. The windows default to 5 blocks; set ACCEPT_WINDOW, SUBMIT_WINDOW or
+# REVIEW_WINDOW in the environment to change them.
+forge script script/Deploy.s.sol --rpc-url $ETH_RPC_URL --broadcast --unlocked --sender $DEPLOYER
+
+# On a fresh Anvil the script always prints these two addresses.
+TOKEN=0x5FbDB2315678afecb367f032d93F642f64180aa3
+ESCROW=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512
+
+# Setup: give the requester 1 mUSD (1,000,000 units) and let the escrow pull it.
+cast send $TOKEN "mint(address,uint256)" $REQUESTER 1000000 --unlocked --from $REQUESTER
+cast send $TOKEN "approve(address,uint256)" $ESCROW 1000000 --unlocked --from $REQUESTER
+
+# The task. Each command prints a receipt; the gas is the gasUsed line.
+cast send $ESCROW "createTask(address,uint256)" $WORKER 1000000 --unlocked --from $REQUESTER
+cast send $ESCROW "acceptTask(uint256)" 1 --unlocked --from $WORKER
+cast send $ESCROW "submitResult(uint256,bytes32)" 1 $(cast keccak "result") --unlocked --from $WORKER
+cast send $ESCROW "approve(uint256)" 1 --unlocked --from $REQUESTER
+
+# Check: the worker holds the payment and the escrow holds nothing.
+cast call $TOKEN "balanceOf(address)(uint256)" $WORKER
+cast call $TOKEN "balanceOf(address)(uint256)" $ESCROW
+```
+
+Gas measured with these commands on 2026-11-06 (Foundry 1.9.0, solc 0.8.30, optimizer
+200 runs, EVM version cancun, fresh Anvil):
+
+| Transaction | Sender | Gas used |
+|-------------|--------|---------:|
+| deploy `MockUSD` | deployer | 507,896 |
+| deploy `RequesterApproveEscrow` | deployer | 911,455 |
+| `mint` | requester | 68,379 |
+| `approve` (token) | requester | 46,330 |
+| `createTask` | requester | 166,696 |
+| `acceptTask` | worker | 35,163 |
+| `submitResult` | worker | 58,071 |
+| `approve` (task) | requester | 65,823 |
+| **the task: create to approve** | | **325,753** |
+
+This is the first task on a new deployment. Its `createTask` is more expensive than
+later ones because it writes the task counter and the escrow's token balance for the
+first time.
+
 ## Run the experiments
 
 _To be written with the Python runner (`src/agentpay/`, `scripts/`)._
