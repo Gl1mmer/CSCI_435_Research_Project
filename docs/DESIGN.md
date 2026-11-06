@@ -5,7 +5,8 @@ Written so that the Python side can drive the contracts with web3.py without rea
 the Solidity.
 
 Status: all three mechanisms are implemented: A (`RequesterApproveEscrow`),
-C (`VerifierAttestedEscrow`) and B (`OptimisticStakeEscrow`).
+C (`VerifierAttestedEscrow`) and B (`OptimisticStakeEscrow`), and so is the optional
+spending guard for SQ3 (`BudgetGuard`).
 
 ## 1. Conventions
 
@@ -228,7 +229,70 @@ Limitations:
 - A very small payment has a bond of 0 (for 10%, any payment below 10 units), and then
   a challenge is free.
 
-## 7. Decisions and reasons
+## 7. `BudgetGuard` (SQ3)
+
+A wallet for the orchestrator with limits the chain enforces. The guard holds the
+tokens. The orchestrator's key can spend them only by creating tasks through the guard,
+and the guard refuses a task that breaks one of three limits.
+
+Two keys:
+
+- **owner**: sets the allowlist and withdraws funds. Meant to be kept offline.
+- **orchestrator**: the agent's everyday key, the one assumed to be at risk.
+
+Constructor parameters, in order:
+
+| Parameter | Type | Meaning |
+|-----------|------|---------|
+| `token_` | address | the ERC-20 the guard holds |
+| `owner_` | address | may change the allowlist and withdraw |
+| `orchestrator_` | address | may create tasks and act as their requester |
+| `perTaskCap_` | uint256 | the most one task may lock (payment plus verifier fee in C) |
+| `epochBudget_` | uint256 | the most all tasks created in one epoch may lock |
+| `epochLength_` | uint256 | blocks per epoch; epoch number = `block.number / epochLength`; must be above 0 |
+
+All six are fixed at deployment and readable (`token()`, `owner()`, ...). To fund the
+guard, transfer or mint tokens to its address.
+
+| Function | Caller | Effect |
+|----------|--------|--------|
+| `setEscrowAllowed(address escrow, bool allowed)` | owner | adds or removes an escrow; emits `EscrowAllowed` |
+| `withdraw(uint256 amount)` | owner | sends tokens from the guard to the owner; emits `Withdrawn` |
+| `createTask(address escrow, address worker, uint256 payment) → uint256 taskId` | orchestrator | checks the three limits, approves the escrow for exactly the deposit and calls its `createTask`; emits `Spent` |
+| `reclaim(address escrow, uint256 taskId)` | orchestrator | forwards to the escrow's `reclaim` (A, C, B) |
+| `approve(address escrow, uint256 taskId)` | orchestrator | forwards to `approve` (A) |
+| `reject(address escrow, uint256 taskId)` | orchestrator | forwards to `reject` (A) |
+| `verifierTimeout(address escrow, uint256 taskId)` | orchestrator | forwards to `verifierTimeout` (C) |
+| `allowedEscrow(address) → bool`, `currentEpoch()`, `spentInEpoch()` | anyone (view) | the allowlist and this epoch's spending |
+
+The guard is the requester of every task it creates: `TaskCreated.requester` is the
+guard's address and every refund returns to the guard. That is why the requester's
+functions have to be forwarded. The forwarded calls work only on allowlisted escrows.
+
+Events: `EscrowAllowed(address indexed escrow, bool allowed)`,
+`Spent(address indexed escrow, uint256 amount, uint256 epoch)`,
+`Withdrawn(address indexed to, uint256 amount)`. The id of a task created through the
+guard is in the escrow's `TaskCreated` event of the same transaction.
+
+Errors: `NotOwner()`, `NotOrchestrator()`, `EscrowNotAllowed()`, `OverTaskCap()`,
+`OverEpochBudget()`, `ZeroAddress()`, `ZeroEpochLength()`.
+
+What the limits mean:
+
+- The cap and the budget count what leaves the guard, which is
+  `escrow.requesterDeposit(payment)`: the payment, plus the verifier fee in C.
+- The budget counts gross spending. A refund returns the tokens to the guard but does
+  not give budget back within the epoch.
+- A thief with the orchestrator key can still create tasks for its own address and, in
+  mechanism A, approve them. The guard does not prevent that loss; it bounds it to
+  `epochBudget` per epoch until the owner withdraws the rest.
+- In mechanism B the guard does not post challenger bonds. A challenge is sent from an
+  ordinary account.
+
+Gas: `contracts/script/gas_one_task.sh` measures `createTask` on escrow A sent directly
+and through the guard. The README shows the result.
+
+## 8. Decisions and reasons
 
 | Decision | Reason |
 |----------|--------|
@@ -250,13 +314,18 @@ Limitations:
 | B: loser's bond goes to the winner | this is what pays a challenger for checking, and what makes a false challenge cost something |
 | B: the task's worker cannot challenge | otherwise a faulty worker challenges itself first and loses nothing |
 | B: arbiter silent → dispute cancelled, deposits returned, payment refunded | without a verdict nobody can be slashed fairly |
+| Guard: separate owner and orchestrator keys | the key that is online every day can only spend within the limits; the key that can take everything stays offline |
+| Guard: budget per epoch counted in blocks | the same clock as the escrows, deterministic in the experiment |
+| Guard: limits apply to the deposit, and refunds do not restore budget | the deposit is what actually leaves the guard; never restoring budget is the simple and safe rule |
+| Guard: approves exactly one deposit per task | the escrow is never left with an allowance it could use later |
+| Guard: limits are fixed at deployment | a stolen key cannot raise them, and there is no admin function to test |
 | Custom errors | cheaper than revert strings and easy to match from tests and web3.py |
 | `Task.state` stored beside `requester` | both fit in one 32-byte slot, which saves a storage write on creation |
 
 Departure from `SRS.md` FR-01: the SRS lets the requester give a completion deadline per
 task. Here the windows are per contract, so that every task in a run has the same timing.
 
-## 8. Using the contracts from Python
+## 9. Using the contracts from Python
 
 `forge build` writes one JSON file per contract:
 
@@ -265,6 +334,7 @@ contracts/out/MockUSD.sol/MockUSD.json
 contracts/out/RequesterApproveEscrow.sol/RequesterApproveEscrow.json
 contracts/out/VerifierAttestedEscrow.sol/VerifierAttestedEscrow.json
 contracts/out/OptimisticStakeEscrow.sol/OptimisticStakeEscrow.json
+contracts/out/BudgetGuard.sol/BudgetGuard.json
 ```
 
 `abi` is the ABI and `bytecode.object` the deployment bytecode. This example was run
@@ -334,7 +404,7 @@ Notes for the runner:
 - A reverted transaction still uses gas. Whether reverted transactions are counted per
   task is the runner's decision (SRS FR-09).
 
-## 9. Static analysis
+## 10. Static analysis
 
 `docs/slither-report.md` holds the Slither output. Slither reports nothing in the
 contracts of this project. The 18 informational results it does report are all in
@@ -349,7 +419,7 @@ OpenZeppelin's code and are accepted:
 Slither's re-entrancy detectors cannot see calls made through `SafeERC20`, so they say
 nothing about our payouts. `contracts/test/Reentrancy.t.sol` tests that instead.
 
-## 10. Gas baseline
+## 11. Gas baseline
 
 `contracts/.gas-snapshot` holds the gas of every unit test, written by `forge snapshot`.
 `forge test --gas-report` prints gas per contract function. `contracts/script/gas_one_task.sh`

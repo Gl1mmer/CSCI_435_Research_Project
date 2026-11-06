@@ -136,10 +136,12 @@ DEPLOYER=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
 REQUESTER=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
 WORKER=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
 
-# Deploy the token and the three escrows. Defaults: every window 5 blocks, verifier =
-# Anvil account 3, verifier fee 10,000 units, arbiter = Anvil account 4, bond 10%.
-# To change them set ACCEPT_WINDOW, SUBMIT_WINDOW, REVIEW_WINDOW, CHALLENGE_WINDOW,
-# ARBITER_WINDOW, VERIFIER, VERIFIER_FEE, ARBITER or BOND_BPS in the environment.
+# Deploy the token, the three escrows and the BudgetGuard. Defaults: every window 5
+# blocks, verifier = Anvil account 3, verifier fee 10,000 units, arbiter = Anvil
+# account 4, bond 10%; guard: orchestrator = Anvil account 1, 2 mUSD per task, 10 mUSD
+# per epoch of 100 blocks. To change them set ACCEPT_WINDOW, SUBMIT_WINDOW,
+# REVIEW_WINDOW, CHALLENGE_WINDOW, ARBITER_WINDOW, VERIFIER, VERIFIER_FEE, ARBITER,
+# BOND_BPS, ORCHESTRATOR, PER_TASK_CAP, EPOCH_BUDGET or EPOCH_LENGTH in the environment.
 forge script script/Deploy.s.sol --rpc-url $ETH_RPC_URL --broadcast --unlocked --sender $DEPLOYER
 
 # On a fresh Anvil the script always prints the same addresses. These are the token
@@ -184,7 +186,8 @@ first time.
 ### One task through each mechanism
 
 `script/gas_one_task.sh` does the same for all three mechanisms and prints the gas of
-every transaction. With `anvil` running, from `contracts/`:
+every transaction. It ends by creating the same task directly and through the
+`BudgetGuard`, to show what the guard adds. With `anvil` running, from `contracts/`:
 
 ```bash
 bash script/gas_one_task.sh
@@ -223,6 +226,11 @@ B optimistic stake: challenged, challenge upheld
   resolve        arbiter        59612
   total for the task           417437
 
+BudgetGuard: gas of createTask on escrow A
+  direct                               159196
+  through guard, first task            192704  (+33508)
+  through guard, next task             175604  (+16408)
+
 all escrows are empty
 ```
 
@@ -231,8 +239,10 @@ Mechanism A costs 318,253 here and 325,753 in the walk-through above for the sam
 calls: in the walk-through the requester's balance and allowance drop to exactly zero in
 `createTask` (two storage refunds, 9,600 gas less) and the worker's balance is written
 for the first time in `approve` (17,100 gas more). The second task on escrow B has a
-cheaper `createTask` because the task counter is already set. The numbers for the paper
-come from the experiment runner, which measures every task.
+cheaper `createTask` because the task counter is already set. The guard's first task
+costs more than its later ones because it writes the guard's spending counter for the
+first time. The numbers for the paper come from the experiment runner, which measures
+every task.
 
 ## Run the experiments
 

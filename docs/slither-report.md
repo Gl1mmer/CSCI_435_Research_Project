@@ -9,12 +9,12 @@ Static analysis of the contracts in `contracts/src` with Slither.
 | Compiler | solc 0.8.30, optimizer 200 runs, EVM version cancun |
 | Foundry | 1.9.0 |
 | Command | `slither .` run in `contracts/` (see the README) |
-| Analysed | 17 contracts (5 of ours, 12 from OpenZeppelin), 102 detectors |
+| Analysed | 18 contracts (6 of ours, 12 from OpenZeppelin), 102 detectors |
 
 ## Result
 
 18 results from 3 detectors. All are informational and all are in OpenZeppelin's
-library code. **No detector reports anything in the five contracts written for this
+library code. **No detector reports anything in the six contracts written for this
 project.**
 
 | Detector | Severity | Results | Where | Decision |
@@ -100,6 +100,7 @@ Detector: pragma
 		-^0.8.20 (dependencies/@openzeppelin-contracts-5.7.0/utils/ReentrancyGuard.sol#4)
 		-^0.8.20 (dependencies/@openzeppelin-contracts-5.7.0/utils/StorageSlot.sol#5)
 	- Version constraint 0.8.30 is used by:
+		-0.8.30 (src/BudgetGuard.sol#2)
 		-0.8.30 (src/EscrowBase.sol#2)
 		-0.8.30 (src/MockUSD.sol#2)
 		-0.8.30 (src/OptimisticStakeEscrow.sol#2)
@@ -170,5 +171,5 @@ It is used by:
 	- ^0.8.20 (dependencies/@openzeppelin-contracts-5.7.0/utils/ReentrancyGuard.sol#4)
 	- ^0.8.20 (dependencies/@openzeppelin-contracts-5.7.0/utils/StorageSlot.sol#5)
 Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#incorrect-versions-of-solidity
-INFO:Slither:. analyzed (17 contracts with 102 detectors), 18 result(s) found
+INFO:Slither:. analyzed (18 contracts with 102 detectors), 18 result(s) found
 ```
