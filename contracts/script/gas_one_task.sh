@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Deploys the contracts to a local Anvil chain, sends one task through each settlement
 # mechanism with real transactions, and prints the gas used by every transaction.
+# At the end it measures what creating a task through the BudgetGuard costs extra.
 #
 # Start `anvil` in another terminal first, then run from the contracts/ folder:
 #   bash script/gas_one_task.sh
@@ -21,19 +22,22 @@ FUNDS=10000000    # 10 mUSD for each funded account
 RESULT=$(cast keccak "result")
 
 # A contract's address follows from the deployer and its nonce. The script deploys the
-# token and then escrows A, C and B, so they take the deployer's next four nonces.
+# token, escrows A, C and B and the guard, so they take the deployer's next five nonces.
 NONCE=$(cast nonce $DEPLOYER)
 address_at() { cast compute-address $DEPLOYER --nonce $((NONCE + $1)) | awk '{print $NF}'; }
 TOKEN=$(address_at 0)
 ESCROW_A=$(address_at 1)
 ESCROW_C=$(address_at 2)
 ESCROW_B=$(address_at 3)
+GUARD=$(address_at 4)
 
 # Fix the script's parameters here, so that values left over in the caller's
-# environment cannot change what is measured.
-ACCEPT_WINDOW=5 SUBMIT_WINDOW=5 REVIEW_WINDOW=5 CHALLENGE_WINDOW=5 ARBITER_WINDOW=5 \
-VERIFIER=$VERIFIER VERIFIER_FEE=10000 ARBITER=$ARBITER BOND_BPS=1000 \
-    forge script script/Deploy.s.sol --rpc-url $ETH_RPC_URL --broadcast --unlocked --sender $DEPLOYER > /dev/null
+# environment cannot change what is measured. The requester account is also the
+# guard's orchestrator, and the epoch is long enough that the run stays inside one.
+export ACCEPT_WINDOW=5 SUBMIT_WINDOW=5 REVIEW_WINDOW=5 CHALLENGE_WINDOW=5 ARBITER_WINDOW=5
+export VERIFIER VERIFIER_FEE=10000 ARBITER BOND_BPS=1000
+export ORCHESTRATOR=$REQUESTER PER_TASK_CAP=2000000 EPOCH_BUDGET=10000000 EPOCH_LENGTH=100000
+forge script script/Deploy.s.sol --rpc-url $ETH_RPC_URL --broadcast --unlocked --sender $DEPLOYER > /dev/null
 
 # send <from> <contract> <signature> [arguments]: sends one transaction, prints its gas.
 send() {
@@ -57,13 +61,15 @@ total() {
     TOTAL=0
 }
 
-# Setup, not part of any task: fund the accounts and let each escrow pull tokens.
+# Setup, not part of any task: fund the accounts and the guard, and let each escrow
+# pull tokens from the accounts.
 for account in $REQUESTER $WORKER $CHALLENGER; do
     send $account $TOKEN "mint(address,uint256)" $account $FUNDS > /dev/null
     for escrow in $ESCROW_A $ESCROW_C $ESCROW_B; do
         send $account $TOKEN "approve(address,uint256)" $escrow $FUNDS > /dev/null
     done
 done
+send $REQUESTER $TOKEN "mint(address,uint256)" $GUARD $FUNDS > /dev/null
 
 echo "A requester-approve: approved"
 step createTask requester $REQUESTER $ESCROW_A "createTask(address,uint256)" $WORKER $PAYMENT
@@ -94,6 +100,29 @@ step submitResult worker $WORKER $ESCROW_B "submitResult(uint256,bytes32)" 2 $RE
 step challenge challenger $CHALLENGER $ESCROW_B "challenge(uint256)" 2
 step resolve arbiter $ARBITER $ESCROW_B "resolve(uint256,bool)" 2 false
 total
+
+# BudgetGuard: the same createTask on escrow A, sent directly and through the guard.
+# Each task is settled before the next is created, so all three are created with the
+# escrow in the same state.
+
+# settle_a <task id> <contract> <approve signature> [arguments]: accept, submit, approve.
+settle_a() {
+    send $WORKER $ESCROW_A "acceptTask(uint256)" $1 > /dev/null
+    send $WORKER $ESCROW_A "submitResult(uint256,bytes32)" $1 $RESULT > /dev/null
+    shift
+    send $REQUESTER "$@" > /dev/null
+}
+
+echo "BudgetGuard: gas of createTask on escrow A"
+DIRECT=$(send $REQUESTER $ESCROW_A "createTask(address,uint256)" $WORKER $PAYMENT)
+settle_a 2 $ESCROW_A "approve(uint256)" 2
+GUARDED_FIRST=$(send $REQUESTER $GUARD "createTask(address,address,uint256)" $ESCROW_A $WORKER $PAYMENT)
+settle_a 3 $GUARD "approve(address,uint256)" $ESCROW_A 3
+GUARDED_LATER=$(send $REQUESTER $GUARD "createTask(address,address,uint256)" $ESCROW_A $WORKER $PAYMENT)
+settle_a 4 $GUARD "approve(address,uint256)" $ESCROW_A 4
+printf "  %-34s %8d\n" "direct" "$DIRECT"
+printf "  %-34s %8d  (+%d)\n" "through guard, first task" "$GUARDED_FIRST" "$((GUARDED_FIRST - DIRECT))"
+printf "  %-34s %8d  (+%d)\n\n" "through guard, next task" "$GUARDED_LATER" "$((GUARDED_LATER - DIRECT))"
 
 # Every task is settled, so no escrow may hold tokens any more.
 for escrow in $ESCROW_A $ESCROW_C $ESCROW_B; do
