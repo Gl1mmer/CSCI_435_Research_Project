@@ -19,3 +19,15 @@ forge-std = "1.17.0"
 # remappings.txt is written by hand, so Soldeer must not regenerate it.
 [soldeer]
 remappings_generate = false
+
+# The seed is fixed so that fuzz and invariant runs, and the gas snapshot, are repeatable.
+[fuzz]
+runs = 500
+seed = "0x435"
+
+[invariant]
+runs = 50
+depth = 100
+# The handler lets calls that the escrow rejects revert; that must not fail the test.
+fail_on_revert = false
+show_metrics = true

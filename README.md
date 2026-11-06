@@ -84,6 +84,16 @@ forge build
 forge test -vv
 ```
 
+`forge test` runs three kinds of test, all in `contracts/test/`:
+
+- unit tests (`*.t.sol`): every path, forbidden transition and wrong caller of each contract;
+- fuzz tests (`fuzz/`): random amounts, windows and call order, 500 runs per test;
+- invariant tests (`invariant/`): 50 random sequences of 100 calls per mechanism, checking
+  after every call that the escrow holds exactly the open deposits, that no task is
+  settled twice, and that no token leaves the system.
+
+The fuzz seed is fixed in `foundry.toml`, so every run tests the same inputs.
+
 `forge test --gas-report` adds a gas table per function. `forge snapshot --check` compares
 the gas of every test with the tracked baseline in `contracts/.gas-snapshot`.
 
