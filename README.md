@@ -23,9 +23,23 @@ scripts/          experiment, figure and calibration scripts
 data/             task set, judge cache, gas-price snapshot
 results/          CSV and JSON written by the runner
 figures/          written by scripts only
-paper/            LaTeX source of the paper
-docs/             design decisions and parameters
+paper/            LaTeX source of the paper, and notes for the method section
+docs/             design decisions and parameters, Slither report
 ```
+
+The contracts, in `contracts/src/`:
+
+| File | What it is |
+|------|------------|
+| `MockUSD.sol` | test ERC-20 with 6 decimals that anyone can mint |
+| `EscrowBase.sol` | the task life-cycle all mechanisms share |
+| `RequesterApproveEscrow.sol` | mechanism A |
+| `VerifierAttestedEscrow.sol` | mechanism C |
+| `OptimisticStakeEscrow.sol` | mechanism B |
+| `BudgetGuard.sol` | spending limits for the orchestrator (SQ3) |
+
+`docs/DESIGN.md` describes every function, event and parameter and explains how to call
+the contracts from Python.
 
 ## Install
 
@@ -83,6 +97,9 @@ cd contracts
 forge build
 forge test -vv
 ```
+
+All 140 tests pass on Windows 11 (Git Bash) and in the Linux container
+`ghcr.io/foundry-rs/foundry:v1.9.0`, both from a fresh clone, with identical gas.
 
 `forge test` runs three kinds of test, all in `contracts/test/`:
 
@@ -171,6 +188,10 @@ Gas measured with these commands on 2026-11-06 (Foundry 1.9.0, solc 0.8.30, opti
 |-------------|--------|---------:|
 | deploy `MockUSD` | deployer | 507,896 |
 | deploy `RequesterApproveEscrow` | deployer | 911,455 |
+| deploy `VerifierAttestedEscrow` | deployer | 1,010,761 |
+| deploy `OptimisticStakeEscrow` | deployer | 1,248,718 |
+| deploy `BudgetGuard` | deployer | 774,223 |
+| `setEscrowAllowed`, three times | deployer | 45,678 each |
 | `mint` | requester | 68,379 |
 | `approve` (token) | requester | 46,330 |
 | `createTask` | requester | 166,696 |
