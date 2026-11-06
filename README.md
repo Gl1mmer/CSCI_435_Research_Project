@@ -86,7 +86,8 @@ forge test -vv
 
 `forge test` runs three kinds of test, all in `contracts/test/`:
 
-- unit tests (`*.t.sol`): every path, forbidden transition and wrong caller of each contract;
+- unit tests (`*.t.sol`): every path, forbidden transition and wrong caller of each
+  contract, and a re-entrancy attack with a hostile token (`Reentrancy.t.sol`);
 - fuzz tests (`fuzz/`): random amounts, windows and call order, 500 runs per test;
 - invariant tests (`invariant/`): 50 random sequences of 100 calls per mechanism, checking
   after every call that the escrow holds exactly the open deposits, that no task is
@@ -96,6 +97,23 @@ The fuzz seed is fixed in `foundry.toml`, so every run tests the same inputs.
 
 `forge test --gas-report` adds a gas table per function. `forge snapshot --check` compares
 the gas of every test with the tracked baseline in `contracts/.gas-snapshot`.
+
+## Static analysis
+
+Slither 0.11.6 needs `web3 < 8`, which conflicts with `requirements.txt`, so it gets a
+virtual environment of its own. From the repository root:
+
+```bash
+python -m venv .venv-slither
+source .venv-slither/bin/activate      # Windows Git Bash: source .venv-slither/Scripts/activate
+pip install slither-analyzer==0.11.6
+cd contracts
+slither .
+```
+
+Slither exits with an error code whenever it reports something, including the
+informational notes about OpenZeppelin's code. The saved output and what it means are
+in `docs/slither-report.md`.
 
 ## Deploy and settle one task on a local chain
 

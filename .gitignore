@@ -224,3 +224,6 @@ contracts/out/
 contracts/cache/
 contracts/dependencies/
 contracts/broadcast/
+
+# Slither has its own venv because it needs web3 < 8
+.venv-slither/

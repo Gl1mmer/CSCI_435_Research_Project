@@ -334,7 +334,22 @@ Notes for the runner:
 - A reverted transaction still uses gas. Whether reverted transactions are counted per
   task is the runner's decision (SRS FR-09).
 
-## 9. Gas baseline
+## 9. Static analysis
+
+`docs/slither-report.md` holds the Slither output. Slither reports nothing in the
+contracts of this project. The 18 informational results it does report are all in
+OpenZeppelin's code and are accepted:
+
+| Detector | Why accepted |
+|----------|--------------|
+| `assembly` (13) | inline assembly inside `SafeERC20` and `StorageSlot`; audited library code |
+| `pragma` (1) | OpenZeppelin uses version ranges, our files use exactly 0.8.30; `foundry.toml` pins one compiler for everything |
+| `solc-version` (4) | those ranges would allow old compilers with known bugs; the pinned 0.8.30 is the only one used |
+
+Slither's re-entrancy detectors cannot see calls made through `SafeERC20`, so they say
+nothing about our payouts. `contracts/test/Reentrancy.t.sol` tests that instead.
+
+## 10. Gas baseline
 
 `contracts/.gas-snapshot` holds the gas of every unit test, written by `forge snapshot`.
 `forge test --gas-report` prints gas per contract function. `contracts/script/gas_one_task.sh`
