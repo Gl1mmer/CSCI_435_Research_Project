@@ -1,0 +1,21 @@
+[profile.default]
+src = "src"
+test = "test"
+script = "script"
+out = "out"
+libs = ["dependencies"]
+
+# Pinned so that everyone compiles the same bytecode and measures the same gas.
+solc_version = "0.8.30"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+
+# Solidity libraries, installed by `forge soldeer install` into dependencies/.
+[dependencies]
+forge-std = "1.17.0"
+"@openzeppelin-contracts" = "5.7.0"
+
+# remappings.txt is written by hand, so Soldeer must not regenerate it.
+[soldeer]
+remappings_generate = false

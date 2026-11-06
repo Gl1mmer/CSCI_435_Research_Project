@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Foundry (contracts/)
+contracts/out/
+contracts/cache/
+contracts/dependencies/
+contracts/broadcast/
