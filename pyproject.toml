@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+# Lets the tests import the package in src/ without installing it.
+pythonpath = ["src"]
+testpaths = ["tests"]
